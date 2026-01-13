@@ -1,51 +1,344 @@
-NOTE: we have stopped maintaining the x86 version of xv6, and switched
-our efforts to the RISC-V version
-(https://github.com/mit-pdos/xv6-riscv.git)
+#!/bin/bash
 
-xv6 is a re-implementation of Dennis Ritchie's and Ken Thompson's Unix
-Version 6 (v6).  xv6 loosely follows the structure and style of v6,
-but is implemented for a modern x86-based multiprocessor using ANSI C.
+# =================================================================
+# XV6 OBSERVABILITY PROJECT CODE GENERATOR
+# =================================================================
+# This script generates the clean source files for:
+# 1. Kernel Flight Recorder (klog.c, klog.h)
+# 2. System Dashboard (sysdash.c)
+# 3. User Log Viewer (klogs.c - with "Cool" formatting)
+# 4. Instructions for modifying core kernel files
+# =================================================================
 
-ACKNOWLEDGMENTS
+echo "Generating project files..."
 
-xv6 is inspired by John Lions's Commentary on UNIX 6th Edition (Peer
-to Peer Communications; ISBN: 1-57398-013-7; 1st edition (June 14,
-2000)). See also https://pdos.csail.mit.edu/6.828/, which
-provides pointers to on-line resources for v6.
+# -----------------------------------------------------------------
+# 1. klog.h - Header for Flight Recorder
+# -----------------------------------------------------------------
+cat << 'EOF' > klog.h
+// Kernel logging system (flight recorder)
+#ifndef KLOG_H
+#define KLOG_H
 
-xv6 borrows code from the following sources:
-    JOS (asm.h, elf.h, mmu.h, bootasm.S, ide.c, console.c, and others)
-    Plan 9 (entryother.S, mp.h, mp.c, lapic.c)
-    FreeBSD (ioapic.c)
-    NetBSD (console.c)
+#define KLOG_SIZE 128 // Number of log entries to keep
 
-The following people have made contributions: Russ Cox (context switching,
-locking), Cliff Frey (MP), Xiao Yu (MP), Nickolai Zeldovich, and Austin
-Clements.
+// struct logentry is defined in types.h to avoid circular deps
 
-We are also grateful for the bug reports and patches contributed by Silas
-Boyd-Wickizer, Anton Burtsev, Cody Cutler, Mike CAT, Tej Chajed, eyalz800,
-Nelson Elhage, Saar Ettinger, Alice Ferrazzi, Nathaniel Filardo, Peter
-Froehlich, Yakir Goaron,Shivam Handa, Bryan Henry, Jim Huang, Alexander
-Kapshuk, Anders Kaseorg, kehao95, Wolfgang Keller, Eddie Kohler, Austin
-Liew, Imbar Marinescu, Yandong Mao, Matan Shabtay, Hitoshi Mitake, Carmi
-Merimovich, Mark Morrissey, mtasm, Joel Nider, Greg Price, Ayan Shafqat,
-Eldar Sehayek, Yongming Shen, Cam Tenny, tyfkda, Rafael Ubal, Warren
-Toomey, Stephen Tu, Pablo Ventura, Xi Wang, Keiichi Watanabe, Nicolas
-Wolovick, wxdao, Grant Wu, Jindong Zhang, Icenowy Zheng, and Zou Chang Wei.
+void klog_init(void);
+void klog_add(int type, int pid, int extra);
+void klog_dump(void);
+int klog_getlogs(struct logentry *buf, int max);
 
-The code in the files that constitute xv6 is
-Copyright 2006-2018 Frans Kaashoek, Robert Morris, and Russ Cox.
+#endif
+EOF
+echo "Created klog.h"
 
-ERROR REPORTS
+# -----------------------------------------------------------------
+# 2. klog.c - Kernel Implementation of Flight Recorder
+# -----------------------------------------------------------------
+cat << 'EOF' > klog.c
+#include "types.h"
+#include "defs.h"
+#include "param.h"
+#include "spinlock.h"
+#include "klog.h"
 
-We don't process error reports (see note on top of this file).
+struct {
+  struct spinlock lock;
+  struct logentry entries[KLOG_SIZE];
+  int head;    // Next write position
+  int count;   // Number of entries
+  uint ticks;  // System uptime counter
+} klog;
 
-BUILDING AND RUNNING XV6
+void
+klog_init(void)
+{
+  initlock(&klog.lock, "klog");
+  klog.head = 0;
+  klog.count = 0;
+  klog.ticks = 0;
+}
 
-To build xv6 on an x86 ELF machine (like Linux or FreeBSD), run
-"make". On non-x86 or non-ELF machines (like OS X, even on x86), you
-will need to install a cross-compiler gcc suite capable of producing
-x86 ELF binaries (see https://pdos.csail.mit.edu/6.828/).
-Then run "make TOOLPREFIX=i386-jos-elf-". Now install the QEMU PC
-simulator and run "make qemu".
+void
+klog_add(int type, int pid, int extra)
+{
+  acquire(&klog.lock);
+  klog.entries[klog.head].timestamp = klog.ticks++;
+  klog.entries[klog.head].event_type = type;
+  klog.entries[klog.head].pid = pid;
+  klog.entries[klog.head].extra = extra;
+  
+  klog.head = (klog.head + 1) % KLOG_SIZE;
+  
+  if(klog.count < KLOG_SIZE)
+    klog.count++;
+    
+  release(&klog.lock);
+}
+
+void
+klog_dump(void)
+{
+  cprintf("\n=== KERNEL LOG DUMP ===\n");
+  int i;
+  int start = (klog.head - klog.count + KLOG_SIZE) % KLOG_SIZE;
+  
+  for(i = 0; i < klog.count; i++){
+    int idx = (start + i) % KLOG_SIZE;
+    cprintf("[%d] type=%d pid=%d extra=%d\n", 
+            klog.entries[idx].timestamp,
+            klog.entries[idx].event_type,
+            klog.entries[idx].pid,
+            klog.entries[idx].extra);
+  }
+}
+
+int
+klog_getlogs(struct logentry *buf, int max)
+{
+  acquire(&klog.lock);
+  int n = klog.count < max ? klog.count : max;
+  int start = (klog.head - n + KLOG_SIZE) % KLOG_SIZE;
+  
+  for(int i = 0; i < n; i++){
+    int idx = (start + i) % KLOG_SIZE;
+    buf[i] = klog.entries[idx];
+  }
+  
+  release(&klog.lock);
+  return n;
+}
+EOF
+[cite_start]echo "Created klog.c [cite: 579-637]"
+
+# -----------------------------------------------------------------
+# 3. sysdash.c - User Dashboard Program
+# -----------------------------------------------------------------
+cat << 'EOF' > sysdash.c
+#include "types.h"
+#include "stat.h"
+#include "user.h"
+
+int
+main(int argc, char *argv[])
+{
+  struct pstat procs[64];
+  struct kstat ks;
+  int n, i;
+
+  // Get kernel stats
+  if(getkernelstats(&ks) < 0) {
+    printf(2, "Error getting kernel stats\n");
+    exit();
+  }
+
+  // Get process stats
+  n = getprocstats(procs, 64);
+  if(n < 0) {
+    printf(2, "Error getting process stats\n");
+    exit();
+  }
+
+  // Display dashboard
+  printf(1, "\n========== xv6 System Dashboard ==========\n");
+  printf(1, "Uptime: %d ticks | CPU Temp: %d C | CPU Load: %d%%\n", 
+         ks.uptime, ks.cputemp, ks.cpuload);
+  printf(1, "Active Processes: %d\n", ks.numproc);
+  printf(1, "==========================================\n\n");
+
+  printf(1, "PID | Name             | State    | Memory\n");
+  printf(1, "----+------------------+----------+-------\n");
+
+  for(i=0; i < n; i++){
+    printf(1, "%d   | %s             | %s  | %d\n", 
+           procs[i].pid, 
+           procs[i].name, 
+           procs[i].state, 
+           procs[i].sz);
+  }
+  printf(1, "\n");
+
+  // Temperature warning
+  if(ks.cputemp > 80) {
+    printf(1, "WARNING: CPU temperature high!\n");
+  }
+  
+  exit();
+}
+EOF
+[cite_start]echo "Created sysdash.c [cite: 1574-1621]"
+
+# -----------------------------------------------------------------
+# 4. klogs.c - User Log Viewer (With Cool Formatting)
+# -----------------------------------------------------------------
+cat << 'EOF' > klogs.c
+#include "types.h"
+#include "stat.h"
+#include "user.h"
+
+int
+main(void)
+{
+  struct logentry entries[128];
+  char *types[] = {"", "SYSCALL", "CTXSW", "TRAP", "FORK", "EXIT"};
+  
+  int n = getklogs(entries, 128);
+  
+  if(n < 0){
+    printf(1, "klogs: failed to get kernel logs\n");
+    exit();
+  }
+  
+  printf(1, "\n========== Kernel Flight Recorder ==========\n");
+  printf(1, "Total entries: %d\n\n", n);
+  
+  // Cool formatted headers
+  printf(1, "%-6s | %-10s | %-4s | %-s\n", "Time", "Event", "PID", "Info");
+  printf(1, "-------|------------|------|-----\n");
+
+  for(int i = 0; i < n; i++){
+    printf(1, "%d      | %s      | %d    | %d\n", 
+      entries[i].timestamp, 
+      types[entries[i].event_type], 
+      entries[i].pid, 
+      entries[i].extra);
+  }
+  
+  exit();
+}
+EOF
+[cite_start]echo "Created klogs.c [cite: 3075-3083]"
+
+# -----------------------------------------------------------------
+# 5. manual_modifications.txt - Snippets for other files
+# -----------------------------------------------------------------
+cat << 'EOF' > manual_modifications.txt
+======================================================
+MANUAL MODIFICATIONS REQUIRED
+Copy and paste these snippets into the respective files.
+======================================================
+
+1. [cite_start]types.h (Add to end of file) [cite: 1405-1428]
+-------------------------------------------------
+// Kernel log event types
+#define LOG_SYSCALL 1
+#define LOG_CTXSWITCH 2
+#define LOG_TRAP 3
+#define LOG_FORK 4
+#define LOG_EXIT 5
+
+struct logentry {
+  uint timestamp;
+  int event_type;
+  int pid;
+  int extra;
+};
+
+struct pstat {
+  int inuse;
+  int pid;
+  char name[16];
+  char state[10]; 
+  int sz;
+  uint runtime;
+  int ctxsw;
+};
+
+struct kstat {
+  uint uptime;
+  int cpuload;
+  int cputemp;
+  int numproc;
+};
+
+2. [cite_start]proc.c (Add these functions to the VERY END) [cite: 2752-2794]
+-----------------------------------------------------------------
+// Get process statistics for dashboard
+int
+getprocstats(struct pstat *buf, int max)
+{
+  struct proc *p;
+  int count = 0;
+  
+  acquire(&ptable.lock);
+  for(p = ptable.proc; p < &ptable.proc[NPROC] && count < max; p++){
+    if(p->state != UNUSED){
+      buf[count].inuse = 1;
+      buf[count].pid = p->pid;
+      memmove(buf[count].name, p->name, 16);
+      
+      // Convert state enum to string
+      char *states[] = { "UNUSED", "EMBRYO", "SLEEPING", "RUNNABLE", "RUNNING", "ZOMBIE" };
+      safestrcpy(buf[count].state, states[p->state], 10);
+      
+      buf[count].sz = p->sz;
+      buf[count].runtime = 0; 
+      buf[count].ctxsw = 0;
+      count++;
+    }
+  }
+  release(&ptable.lock);
+  return count;
+}
+
+// Get kernel statistics
+int
+getkernelstats(struct kstat *ks)
+{
+  extern uint ticks;
+  extern int cputemp;
+  extern int cpuload;
+  
+  ks->uptime = ticks;
+  ks->cputemp = cputemp;
+  ks->cpuload = cpuload;
+  ks->numproc = 0;
+  
+  struct proc *p;
+  acquire(&ptable.lock);
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+    if(p->state != UNUSED)
+      ks->numproc++;
+  }
+  release(&ptable.lock);
+  
+  return 0;
+}
+
+3. [cite_start]trap.c (Add globals at top) [cite: 2006-2009]
+------------------------------------------------
+int cputemp = 35;
+int cpuload = 0;
+uint idle_ticks = 0;
+uint busy_ticks = 0;
+
+4. [cite_start]trap.c (Inside trap(), case T_IRQ0 + IRQ_TIMER:) [cite: 1445-1467]
+---------------------------------------------------------------------
+// Replace or add to the timer section:
+if(cpuid() == 0){
+  acquire(&tickslock);
+  ticks++;
+  
+  // Thermal Model
+  struct proc *p = myproc();
+  if(p && p->state == RUNNING) {
+    busy_ticks++;
+    if(cputemp < 95) cputemp++; 
+  } else {
+    idle_ticks++;
+    if(cputemp > 35) cputemp--; 
+  }
+  
+  if((busy_ticks + idle_ticks) >= 100) {
+    cpuload = (busy_ticks * 100) / (busy_ticks + idle_ticks);
+    busy_ticks = 0;
+    idle_ticks = 0;
+  }
+  
+  wakeup(&ticks);
+  release(&tickslock);
+}
+EOF
+echo "Created manual_modifications.txt with snippets for proc.c, trap.c, and types.h"
+echo "Done! You can now compile with 'make clean' and 'make qemu'."
