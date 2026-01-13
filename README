@@ -1,1 +1,296 @@
 
+# Enhanced Observability and Monitoring in xv6
+
+> Kernel-Level Flight Recorder & Unified System Monitoring Dashboard
+
+<div align="center">
+
+`[ Cover screenshot placeholder: boot + sysdash + klogs ]`
+
+</div>
+
+---
+
+## 📄 Project Summary
+
+This project extends the original MIT xv6 operating system with **modern observability primitives** inspired by Linux `dmesg`, `top/htop`, thermal governors, and kernel flight recorder mechanisms.
+
+It introduces **two core subsystems**:
+
+1. **Kernel-Level Flight Recorder (Black Box Recorder)**
+2. **Unified System Monitoring Dashboard (sysdash)**
+
+Both significantly enhance system-level visibility in an otherwise minimalist teaching OS.
+
+Full project proposal PDF is included in the repo and can be viewed here: [https://github.com/tanvirbinzahid/ENHANCED-OBSERVABILITY-AND-MONITORING-IN-XV6/blob/master/Details.pdf](https://github.com/tanvirbinzahid/ENHANCED-OBSERVABILITY-AND-MONITORING-IN-XV6/blob/master/Details.pdf)
+
+---
+
+## ✨ Features
+
+### ✔ 1. Kernel-Level Flight Recorder
+
+A low-overhead circular log buffer that captures last N kernel events:
+
+* System calls
+* Context switches
+* Exceptions / traps
+* Timer interrupts
+* `fork()` events
+* `exit()` events
+
+Provides reliable post-mortem visibility similar to `dmesg`, aircraft black box recorders, and kernel ring buffers.
+
+Additional capabilities:
+
+* Automatic panic dump (last N entries)
+* User-space consumption via syscall `getklogs()`
+* Visualization via `klogs` tool
+
+---
+
+### ✔ 2. Unified System Monitoring Dashboard (sysdash)
+
+A real-time console dashboard inspired by `top/htop`, showing:
+
+* Uptime (ticks)
+* CPU Temperature (virtual)
+* Load Percentage
+* Per-process statistics:
+
+  * PID
+  * Name
+  * State
+  * CPU%
+  * Memory
+  * Context switches
+  * Runtime
+
+Powered by new syscalls `getprocstats()` and `getkernelstats()`.
+
+Virtual CPU thermal model:
+
+* Busy → heat ↑
+* Idle → cool ↓
+* Range: `35°C – 95°C`
+* Warnings above `80°C`
+
+---
+
+## 🧩 System Architecture
+
+```
+┌───────────────────────────────────────────────────┐
+│                       User Space                  │
+│                                                   │
+│  ┌─────────────┐   ┌──────────────┐   ┌────────┐ │
+│  │   klogs     │   │   sysdash     │   │  shell │ │
+│  └─────┬───────┘   └──────┬───────┘   └────────┘ │
+│        │ syscall(getklogs) │ syscall(getprocstats)│
+└────────┼───────────────────┼──────────────────────┘
+         │                   │
+┌────────▼───────────────────▼────────────────────────┐
+│                       Kernel                        │
+│                                                     │
+│   ┌─────────────┐     ┌────────────┐     ┌────────┐ │
+│   │ Flight Rec. │◄────┤ Trap/SC/Fork├───►│ Sched. │ │
+│   └──────┬──────┘     └─────┬──────┘     └────────┘ │
+│          │                  │                        │
+│          ▼                  ▼                        │
+│   Circular Log Buffer   kstat/pstat Export           │
+└──────────────────────────────────────────────────────┘
+```
+
+---
+
+### 🌐 Mermaid Variant
+
+```mermaid
+flowchart TD
+    U1[klogs] -->|getklogs()| K1
+    U2[sysdash] -->|getprocstats()/getkernelstats()| K2
+    K1((Flight Recorder)) --> BUF((Ring Buffer))
+    K3[Traps/Syscalls/Fork/Exit] --> K1
+    K2((Stats Export Layer)) --> PROC[Process Table]
+    K2 --> TEMP[Virtual Thermal Model]
+    PROC --> SCHED[Scheduler]
+```
+
+---
+
+## 🛠 Build & Run (Kali Linux / QEMU)
+
+### **Prerequisites**
+
+```bash
+sudo apt update
+sudo apt install build-essential gdb qemu-system-x86
+```
+
+### **Clone + Build**
+
+```bash
+git clone https://github.com/mit-pdos/xv6-public.git
+cd xv6-public
+make
+```
+
+### **Run**
+
+```bash
+make qemu
+```
+
+To exit QEMU:
+
+```
+Ctrl + A  then  X
+```
+
+---
+
+## 📺 Demo Output (ASCII Mockups)
+
+### **`klogs` Flight Recorder Output**
+
+```
+=== Kernel Flight Recorder ===
+Total entries: 128
+
+Time | Type     | PID | Extra
+---------------------------------
+0    | SYSCALL  | 1   | 5
+1    | FORK     | 1   | 2
+2    | CTXSW    | 2   | 0
+3    | SYSCALL  | 2   | 1
+4    | EXIT     | 2   | 0
+...
+```
+
+### **`sysdash` System Dashboard**
+
+```
+================= xv6 System Dashboard =================
+Uptime: 4283 ticks   CPU Temp: 72°C   Load: 64%
+--------------------------------------------------------
+PID  Name   State     CPU%   Mem   CtxSw   Runtime
+1    init   SLEEP     1%     12K   22      1100
+2    sh     RUN       64%    24K   118     2380
+3    klog   SLEEP     0%     4K    3       80
+--------------------------------------------------------
+Warnings:
+- CPU heating up!
+```
+
+---
+
+## 🔍 Kernel Modifications (Deep Dive)
+
+### ### **Subsystem 1: Flight Recorder**
+
+Files touched:
+
+```
+types.h  (struct logentry)
+klog.h, klog.c  (ring buffer)
+syscall.c       (LOG_SYSCALL)
+trap.c          (LOG_TRAP)
+proc.c          (LOG_CTXSWITCH, LOG_FORK, LOG_EXIT)
+```
+
+Exports data via:
+
+```c
+int getklogs(struct logentry *buf, int max);
+```
+
+---
+
+### **Subsystem 2: Sysdash Runtime Stats**
+
+New syscalls:
+
+```c
+getprocstats(struct pstat *buf, int max);
+getkernelstats(struct kstat *ks);
+```
+
+Thermal model:
+
+```c
+temp += (cpu_busy) ? +Δ : -Δ;
+temp = clamp(temp, 35, 95);
+```
+
+---
+
+## 📦 Packaging Instructions (For Instructors)
+
+Include the following items:
+
+✔ Source tree (modified xv6)
+✔ Screenshots or recordings of `klogs` & `sysdash`
+✔ Build logs
+✔ PDF Proposal (included as `Details.pdf`)
+✔ README.md (this file)
+
+Optional:
+
+* Patch diff (`git diff > changes.patch`)
+* Video demo
+
+---
+
+## 🪪 Academic Submission Block
+
+```
+Student: YOUR NAME HERE
+ID: YOUR ID HERE
+Course: Operating Systems
+Institution: YOUR UNIVERSITY HERE
+Semester: FALL 2025
+Instructor: NAME HERE
+```
+
+---
+
+## 📚 BibTeX Citation
+
+```bibtex
+@misc{zahid_xv6_obs_2025,
+  title={Enhanced Observability and Monitoring in xv6},
+  author={Zahid, Tanvir Bin},
+  year={2025},
+  howpublished={Project Report},
+  institution={North South University},
+  note={Kernel-Level Flight Recorder & Unified System Monitoring Dashboard}
+}
+```
+
+---
+
+## 📄 License
+
+This project extends the original xv6 (MIT license). Additional code is released under MIT.
+
+---
+
+## 🚧 Future Work / Roadmap
+
+* Hardware performance counters
+* Interrupt frequency visualization
+* IPC/pipe throughput graphs
+* User-level thermal governor
+* Remote telemetry via serial
+
+---
+
+## 👥 Credits
+
+* xv6 authors (MIT PDOS)
+* Course staff & advisors
+* Contributors & reviewers
+
+---
+
+> For more context, consult the full PDF proposal included as `Details.pdf`. fileciteturn1file0
